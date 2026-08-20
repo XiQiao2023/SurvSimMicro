@@ -1,0 +1,458 @@
+---
+title: "Simulating TTE"
+format: 
+  html:
+    code-fold: true
+    code-tools: true
+    toc: true
+    embed-resources: true
+#    theme: lux
+editor: visual
+# editor_options: 
+#   chunk_output_type: console
+execute:
+  warning: false
+  cache: true
+engine: knitr
+---
+
+# Set up
+
+```{r}
+setwd("~/Library/CloudStorage/OneDrive-UniversityofUtah/TTE_sims")
+for (f in list.files("R", full.names = TRUE, pattern = "\\.R$")) source(f)
+load("example_data.Rdata")
+names(example_data)<-paste0("ASV", 1:ncol(example_data))
+rownames(example_data)<-paste0("Person", 1:nrow(example_data))
+```
+
+```{r}
+library(tidyverse)
+library(survival)
+library(simsurv)
+library(pheatmap)
+```
+
+# Time to event simulation
+
+The final function simulate_tte runs off a set of modularized functions.
+
+1.  Transform the data. Transforms the count matrix to a non-restricted space (no longer positive integers and no longer subject to the unit sum constraint). This transformed matrix can then be treated like a matrix of continuous predictors.
+
+2.  Create predictor value from linear or non-linear equations. This takes the transformed matrix and directions about which predictors should affect the outcome in which way and returns a single scalar value. This single scalar value is basically a risk score.
+
+3.  TTE design.
+
+```         
+-   Option 1: Every gets a latent failure time.
+
+-   Option 2: Mixture-cure model. This requires two scores, one for experiencing the event and one for when the event occurs.
+```
+
+4.  Censoring. This can be administrative, random (according to some distribution), or both.
+
+# Example data
+
+We're using data from a real example dataset I have. This is uncorrected data, and is not normalized, so the original library size is retained. There are 144 people and 1,731 ASV's.
+
+```{r}
+
+matrix_data <- as.matrix(example_data)
+log_matrix <- log1p(matrix_data)
+pheatmap(
+  mat = log_matrix,
+  
+  # Turn off the text to fix the issue in your image
+  show_rownames = FALSE, 
+  show_colnames = FALSE, 
+  
+  # Remove the borders around the cells (crucial for high-dimensional data)
+  border_color = NA,
+  
+  # Cluster rows and columns so similar profiles group together
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  
+  # Define a color palette (viridis is great, or use this standard blue-white-red)
+  color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+  
+  # Add a title
+  main = "Clustered Microbial Abundance Heatmap"
+)
+```
+
+# Step 1: Transformation
+
+```{r}
+transformed_matrix <- sim_transform(matrix_data)
+
+pheatmap(
+  mat = transformed_matrix,
+  
+  # Turn off the text to fix the issue in your image
+  show_rownames = FALSE, 
+  show_colnames = FALSE, 
+  
+  # Remove the borders around the cells (crucial for high-dimensional data)
+  border_color = NA,
+  
+  # Cluster rows and columns so similar profiles group together
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  
+  # Define a color palette (viridis is great, or use this standard blue-white-red)
+  color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+  
+  # Add a title
+  main = "Clustered Microbial Abundance Heatmap"
+)
+```
+
+# Step 2: Predictor value
+
+Function takes in the matrix, the indices of the 'active' predictors, and either a vector of coefficients or a function.
+
+## Option 1: Linear predictors
+
+If you want simple linear predictors, you just need to supply beta coefficients. The vector of beta coefficients should be the same length as the vector of active predictors.
+
+```{r}
+# Pick 50 "active" ASVs and give each a positive coefficient.
+active_idx <- 1:50
+betas      <- rep(0.15, length(active_idx))
+
+# One risk score (eta) per person.
+eta_linear <- sim_predictor(transformed_matrix,
+                            index = active_idx,
+                            betas = betas)
+
+str(eta_linear)
+
+ggplot(data.frame(eta = eta_linear), aes(x = eta)) +
+  geom_histogram(bins = 25, fill = "grey70", color = "white") +
+  labs(title = "Linear predictor (risk score) distribution",
+       x = expression(eta), y = "Count") +
+  theme_classic()
+```
+
+## Option 2: Custom function
+
+If you want a more complex relationship, specify the function you want. Write it so that it takes in a vector of arguments, and then the active predictors will be used as the input to that function.
+
+```{r}
+# Each active predictor is passed as a positional argument to the function.
+# Here: an interaction between ASV1 and ASV2 plus a nonlinear term on ASV3.
+eta_custom <- sim_predictor(
+  transformed_matrix,
+  index = c(1, 2, 3),
+  fn    = function(x1, x2, x3) 0.3 * x1 * x2 + sin(x3)
+)
+
+str(eta_custom)
+
+ggplot(data.frame(eta = eta_custom), aes(x = eta)) +
+  geom_histogram(bins = 25, fill = "grey70", color = "white") +
+  labs(title = "Custom (non-linear) predictor distribution",
+       x = expression(eta), y = "Count") +
+  theme_classic()
+```
+
+## Mixture-cure model
+
+If doing a mixture-cure model, the design is 2 stage. There is one risk score to calculate the risk of a person being at risk, and then one score to calculate the event time for the people at risk. I suggest using the same set of active predictors for both, but this is flexible.
+
+```{r}
+set.seed(7)
+
+# Same active set drives both stages here (flexible — they can differ).
+cure_idx <- 51:70
+
+# Occurrence score (logit scale): governs who is susceptible / at risk.
+eta_occurrence <- sim_predictor(transformed_matrix,
+                                index = cure_idx,
+                                betas = rnorm(length(cure_idx), 0, 0.8))
+
+# Timing score: governs the failure time among the susceptible.
+eta_timing <- sim_predictor(transformed_matrix,
+                            index = cure_idx,
+                            betas = rep(-0.2, length(cure_idx)))
+
+# sim_tte turns the occurrence score into a person-specific susceptibility
+# probability pi_i = plogis(a + eta_occurrence); the intercept a is solved
+# internally to hit the target at-risk proportion.
+head(data.frame(eta_occurrence = eta_occurrence, eta_timing = eta_timing))
+```
+
+# Step 3: Time to event
+
+## Latent failure
+
+In this type of model, every person gets a latent failure time. It is parametric, based on the predictor score. It can be either proportional hazards or AFT based.
+
+### Weibull PH example:
+
+Parameterization of the weibull model based off of the weibull distribution with shape parameter $\gamma > 0$ and scale/rate parameter $\lambda > 0$ . Shape controls whether the hazard increases or decreases with time. As $\lambda$ increases, the hazard increases, and survival is shorter.
+
+Weibull proportional hazards relationships.
+
+Baseline hazard function
+
+$$
+h_0(t) = \gamma\lambda t^{\gamma-1}
+$$
+
+Baseline cumulative hazard function
+
+$$
+H_0(t) = \int_0^t h_0(s) ds \\
+=  \lambda \int_0^t \gamma s^{\gamma-1} ds\\
+= \lambda t^{\gamma}\\
+= -\log(S_0(t))
+$$
+
+Baseline survival function
+
+$$
+S_0(t) = \exp(-H_0(t)) \\ 
+= \exp(-\lambda t^{\gamma})\\
+= 1 - F_0(t)
+$$
+
+Baseline probability density function
+
+$$
+f_0(t) = S_0(t) h_0(t)\\
+=  \exp(-\lambda t^{\gamma})\gamma\lambda t^{\gamma-1}\\
+= -\frac{d}{dt}S_0(t)\\
+= \frac{d}{dt}F_0(t)
+$$
+
+Baseline cumulative incidence function
+
+$$
+F_0(t) = 1- S_0(t) \\
+= 1 - \exp(-\lambda t^{\gamma})
+$$
+
+This cumulative incidence function is a weibull CDF.
+
+With linear predictors given by $\eta_i = x_i^T \beta$, the person specific functions are
+
+Person specific hazard function
+
+$$
+h_i(t) = h_0(t) \exp(\eta_i) \\
+=\gamma\lambda t^{\gamma-1} \exp(\eta_i)
+$$
+
+Person specific cumulative hazard function
+
+$$
+H_i(t) = \int_0^t h_i(s) ds \\
+=  \lambda \exp(\eta_i) \int_0^t \gamma s^{\gamma-1} ds\\
+= \lambda t^{\gamma} \exp(\eta_i)\\
+= -\log(S_it))
+$$
+
+Person specific survival function
+
+$$
+S_i(t) = \exp(-H_i(t)) \\ 
+= \exp(-\lambda t^{\gamma}\exp(\eta_i))\\
+= 1 - F_i(t)
+$$
+
+Person specific density function
+
+$$
+f_i(t) = S_i(t) h_i(t)\\
+=  \exp(-\lambda t^{\gamma}\exp(\eta_i))\gamma\lambda t^{\gamma-1}\exp(\eta_i)\\
+= -\frac{d}{dt}S_i(t)\\
+= \frac{d}{dt}F_i(t)
+$$
+
+Person specific cumulative distribution function
+
+$$
+F_i(t) = 1- S_i(t) \\
+= 1 - \exp(-\lambda t^{\gamma}\exp(\eta_i))
+$$
+
+Consider $\eta \sim N(0, \sigma^2)$ to be a random pull. Then $\exp(\eta) \sim$ lognormal. This means that only the **conditional** event time $T_i | \eta_i$ is weibull ditributed.
+
+Generic value of gamma: gamma = 1
+
+-   Constant hazard: 1
+
+-   Moderately increasing hazard: \[1.2, 1\]
+
+-   Decreasing hazard due to early risk: \< 1
+
+#### Scale of weibull should correlate with desired median survival time
+
+-   Choose a median survival time $m$ so that we can solve for
+
+    $$
+    m:= arg{ S_0(m) = 0.5}\\
+     \exp(-\lambda m^{\gamma}) = 0.5 \\
+     \lambda = -\frac{log 0.5}{m ^{\gamma}}
+    $$
+
+-   Choose a baseline event probability $p$ at a certain time $\tau$
+
+    $$
+    p:= Pr(T_{event} \leq \tau) = 1 - S_0(\tau) \\
+    S_0(\tau) = 1-p\\
+    \exp(-\lambda \tau ^ {\gamma}) = 1-p \\
+    \lambda = \frac{-\log(1-p)}{\tau^{\gamma}}
+    $$
+
+```{r}
+set.seed(42)
+
+# Timing predictor: reuse the linear risk score from Step 2.
+eta_timing_ex <- sim_predictor(transformed_matrix,
+                               index = 1:50,
+                               betas = rep(0.15, 50))
+
+# Draw latent failure times: Weibull PH, shape 1.5, baseline median 5.
+tte_ph <- sim_tte(
+  eta_timing    = eta_timing_ex,
+  design        = "1stage",
+  model         = "ph",
+  dist          = "weibull",
+  params        = list(shape = 1.5),
+  target_median = 5
+)
+
+# Latent failure time for the (single) event — adapted from the 2-event
+# diagnostic down to one event.
+df_event <- data.frame(id     = tte_ph$id,
+                       time   = tte_ph$latent_time,
+                       status = 1)
+
+# Theoretical BASELINE (eta = 0) Weibull density from the calibrated params.
+# simsurv uses H0(t) = lambda * t^shape, so R's dweibull scale = lambda^(-1/shape)
+# (this reduces to 1/lambda when shape = 1).
+wb_shape <- tte_ph$shape
+wb_scale <- tte_ph$lambda^(-1 / wb_shape)
+
+# Note: because eta varies across people, the *marginal* latent density is a
+# mixture (exp(eta) is lognormal) and only the *conditional* time T | eta is
+# exactly Weibull — see the note above. The baseline curve is a face-validity
+# reference, not an exact fit to the marginal.
+ggplot(df_event, aes(x = time)) +
+  geom_density(aes(color = "Event (latent)"), linewidth = 1) +
+  stat_function(fun  = dweibull,
+                args = list(shape = wb_shape, scale = wb_scale),
+                aes(color = "Theoretical (baseline, eta = 0)"),
+                linewidth = 1) +
+  scale_color_manual(
+    name   = "Distribution",
+    values = c("Event (latent)"                 = "darkred",
+               "Theoretical (baseline, eta = 0)" = "black")
+  ) +
+  coord_cartesian(xlim = c(0, quantile(df_event$time, 0.99))) +
+  labs(title = "Latent Event Times vs. Theoretical Baseline Weibull Density",
+       x = "Time", y = "Density") +
+  theme_classic()
+```
+
+## Mixture-Cure
+
+Here instead of giving everyone a failure time, we specify the people who are at risk. Traditionally we'd have the model as:
+
+$$
+S(t) = (1-\pi) + \pi S_1(t)
+$$
+
+We allow for the $\pi$ to be a function rather than a single value. This way you can determine who is at risk. If you want it to be random you can have the predictor function just be a constant.
+
+# Step 4: Censoring
+
+In the latent failure time, event rate is completely controlled by censoring. In the mixture-cure, event rate is controlled by a mix of the 'at risk' function ( $\pi$) as well as censoring.
+
+## Administrative
+
+Administrative censoring can be chosen by a specific value of desired censoring time, or by a target event rate.
+
+## Random
+
+Random censoring requires a distribution. Currently we have implemented an exponential censoring rate. For proportional hazards assumptions to hold, censoring should be non-informative and not related to any of the predictors.
+
+# Full examples
+
+## Latent time weibull ph
+
+```{r}
+set.seed(42)
+betas_1 <- rep(0.15, 50)
+
+res1 <- simulate_tte(
+  counts          = example_data,
+  design          = "one_stage",
+  transform_args  = list(method = "clr", pseudocount = 0.5),
+  predictor_args  = list(index = 1:50, betas = betas_1),
+  tte_args        = list(model         = "ph",
+                         dist          = "weibull",
+                         params        = list(shape = 1.5),
+                         target_median = 5),
+  censor_args     = list(type = "administrative"),
+  target_event_prop = 0.60,
+  seed            = 42L
+)
+
+print(res1)
+```
+
+## Mixture-cure weibull aft
+
+```{r}
+set.seed(7)
+betas_occ    <- rnorm(20, mean = 0, sd = 0.8)
+betas_timing <- rep(-0.2, 20)   # negative → shorter AFT survival
+
+res2 <- simulate_tte(
+  counts               = example_data,
+  design               = "two_stage",
+  transform_args       = list(method = "clr", pseudocount = 0.5),
+  predictor_occurrence = list(index = 51:70,  betas = betas_occ),
+  predictor_timing     = list(index = 71:90,  betas = betas_timing),
+  tte_args             = list(model         = "aft",
+                              dist          = "weibull",
+                              params        = list(shape = 1.2),
+                              target_median = 6),
+  censor_args          = list(type                = "administrative_plus_random",
+                              administrative_time = 15,
+                              random              = list(dist = "exponential",
+                                                         rate = 0.08)),
+  target_event_prop    = 0.55,
+  seed                 = 7L
+)
+
+print(res2)
+
+# Susceptibility check: π_i should vary and mean ≈ target_event_prop = 0.55
+pi_mean <- mean(res2$tte$pi)
+```
+
+## Latent time with non-linear predictor function (exponential ph)
+
+```{r}
+res3 <- simulate_tte(
+  counts          = example_data,
+  design          = "one_stage",
+  transform_args  = list(method = "clr"),
+  predictor_args  = list(index = 1:2,
+                         fn    = function(a, b) 0.3 * a - 0.3 * b),
+  tte_args        = list(model         = "ph",
+                         dist          = "exponential",
+                         params        = list(shape = 1),
+                         target_median = 4),
+  censor_args     = list(type = "administrative"),
+  target_event_prop = 0.65,
+  seed            = 99L
+)
+
+print(res3)
+```
