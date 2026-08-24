@@ -204,6 +204,47 @@ ui <- page_navbar(
       vertical-align: text-top;
     }
     .help-dot:hover, .help-dot:focus { opacity: 1; }
+    .count-summary-panel {
+      min-width: 0;
+      overflow: hidden;
+      margin-bottom: 1rem;
+      border: 1px solid var(--bs-border-color);
+      border-radius: var(--bs-border-radius-lg);
+      background: var(--bs-body-bg);
+    }
+    .count-summary-heading {
+      margin: 0;
+      padding: .75rem 1rem;
+      border-bottom: 1px solid var(--bs-border-color);
+      font-size: .9rem;
+      font-weight: 700;
+    }
+    .count-summary-scroll {
+      height: 240px;
+      overflow: auto;
+      padding: .75rem 1rem;
+      scrollbar-gutter: stable;
+    }
+    .count-summary-scroll pre {
+      min-height: 100%;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      white-space: pre-wrap;
+    }
+    .tab-scroll-box {
+      height: calc(100vh - 270px);
+      min-height: 440px;
+      max-height: 720px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      padding-right: .5rem;
+      scrollbar-gutter: stable;
+    }
+    .tab-scroll-box > .shiny-plot-output {
+      margin-bottom: 1rem;
+    }
     .workflow-intro {
       padding: .75rem 1rem;
       margin-bottom: 1rem;
@@ -211,6 +252,13 @@ ui <- page_navbar(
       background: rgba(var(--bs-primary-rgb), .08);
     }
     .download-row { display: flex; flex-wrap: wrap; gap: .5rem; }
+    @media (max-width: 900px) {
+      .count-summary-scroll { height: 220px; }
+      .tab-scroll-box {
+        height: 65vh;
+        min-height: 360px;
+      }
+    }
   ")),
 
   nav_panel(
@@ -297,7 +345,14 @@ ui <- page_navbar(
       navset_card_tab(
         nav_panel(
           "Summary",
-          verbatimTextOutput("summary"),
+          tags$section(
+            class = "count-summary-panel",
+            h3(class = "count-summary-heading", "Simulation summary"),
+            div(
+              class = "count-summary-scroll",
+              verbatimTextOutput("summary")
+            )
+          ),
           plotOutput("phylum_plot", height = "420px"),
           div(
             class = "download-row",
@@ -312,9 +367,12 @@ ui <- page_navbar(
         ),
         nav_panel(
           "Diagnostics",
-          plotOutput("depth_plot", height = "260px"),
-          plotOutput("shannon_plot", height = "260px"),
-          plotOutput("pca_plot", height = "320px")
+          div(
+            class = "tab-scroll-box",
+            plotOutput("depth_plot", height = "260px"),
+            plotOutput("shannon_plot", height = "260px"),
+            plotOutput("pca_plot", height = "320px")
+          )
         )
       )
     )
@@ -440,8 +498,11 @@ ui <- page_navbar(
       navset_card_tab(
         nav_panel(
           "Overview",
-          verbatimTextOutput("surv_summary"),
-          plotOutput("surv_km_plot", height = "380px")
+          div(
+            class = "tab-scroll-box",
+            verbatimTextOutput("surv_summary"),
+            plotOutput("surv_km_plot", height = "380px")
+          )
         ),
         nav_panel(
           "Data",
@@ -456,8 +517,11 @@ ui <- page_navbar(
         ),
         nav_panel(
           "Diagnostics",
-          plotOutput("surv_time_plot", height = "280px"),
-          plotOutput("surv_risk_plot", height = "320px")
+          div(
+            class = "tab-scroll-box",
+            plotOutput("surv_time_plot", height = "280px"),
+            plotOutput("surv_risk_plot", height = "320px")
+          )
         )
       )
     )
